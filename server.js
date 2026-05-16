@@ -8,6 +8,11 @@ const {
     REST,
     Routes,
     EmbedBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    ActionRowBuilder,
+    StringSelectMenuBuilder,
+    StringSelectMenuOptionBuilder,
 } = require('discord.js');
 
 const app = express();
@@ -16,13 +21,10 @@ app.use(express.json());
 const { BOT_TOKEN, CLIENT_ID, GUILD_ID, SHARED_SECRET, PORT = 3000 } = process.env;
 
 // ── Storage ───────────────────────────────────────────────────────────────────
-// activeServers: Map<jobId, { placeId, serverType, maxPlayers, startTime, players: Map<userId, PlayerData>, chatLog: [] }>
-// recentSessions: Map<userId, { username, displayName, chatLog, friendsInServer, jobId, leaveTime }>
-const activeServers = new Map();
+const activeServers  = new Map();
 const recentSessions = new Map();
-const usernameToId = new Map();  // username (lowercase) -> userId
-const playerIndex = new Map();   // userId -> { username, displayName, currentJobId }
-const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+const usernameToId   = new Map();
+const playerIndex    = new Map();
 
 // ── Roblox API ────────────────────────────────────────────────────────────────
 function robloxGet(url) {
@@ -56,7 +58,7 @@ function auth(req, res, next) {
 // ── Event endpoint ────────────────────────────────────────────────────────────
 app.post('/event', auth, async (req, res) => {
     const { type, jobId, ...data } = req.body;
-    res.json({ ok: true }); // respond immediately so Roblox doesn't time out
+    res.json({ ok: true });
 
     if (type === 'server_start') {
         activeServers.set(jobId, {
@@ -75,20 +77,12 @@ app.post('/event', auth, async (req, res) => {
 
     if (type === 'player_join') {
         const { userId, username, displayName, accountAge } = data;
-
         const friendIds = await getFriendIds(userId);
         const friendsInServer = [];
         for (const [pid, p] of server.players) {
             if (friendIds.has(pid)) friendsInServer.push(p.username);
         }
-
-        const playerData = {
-            userId, username, displayName, accountAge,
-            joinTime: Date.now(),
-            friendsInServer,
-            chatLog: [],
-        };
-
+        const playerData = { userId, username, displayName, accountAge, joinTime: Date.now(), friendsInServer, chatLog: [] };
         server.players.set(userId, playerData);
         usernameToId.set(username.toLowerCase(), userId);
         playerIndex.set(userId, { username, displayName, currentJobId: jobId });
@@ -99,7 +93,6 @@ app.post('/event', auth, async (req, res) => {
         const { userId } = data;
         const player = server.players.get(userId);
         if (!player) return;
-
         recentSessions.set(userId, {
             username: player.username,
             displayName: player.displayName,
@@ -108,7 +101,6 @@ app.post('/event', auth, async (req, res) => {
             friendsInServer: [...player.friendsInServer],
             leaveTime: Date.now(),
         });
-
         server.players.delete(userId);
         playerIndex.delete(userId);
         return;
@@ -173,7 +165,6 @@ function buildChatEmbed(title, chatLog, color) {
     );
     let desc = lines.join('\n');
     if (desc.length > 4000) {
-        // Show most recent messages that fit
         const trimmed = [];
         let len = 0;
         for (let i = lines.length - 1; i >= 0; i--) {
@@ -191,6 +182,21 @@ function buildChatEmbed(title, chatLog, color) {
         .setTimestamp();
 }
 
+function buildServerSelectMenu(customId, placeholder) {
+    const entries = [...activeServers.entries()].slice(0, 25);
+    const options = entries.map(([jobId, server]) =>
+        new StringSelectMenuOptionBuilder()
+            .setLabel(`${server.serverType} · ${server.players.size}/${server.maxPlayers}`)
+            .setDescription(`Job: ${jobId.substring(0, 50)}`)
+            .setValue(jobId)
+    );
+    const select = new StringSelectMenuBuilder()
+        .setCustomId(customId)
+        .setPlaceholder(placeholder)
+        .addOptions(options);
+    return new ActionRowBuilder().addComponents(select);
+}
+
 // ── Discord bot ───────────────────────────────────────────────────────────────
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -206,8 +212,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('serverchat')
-        .setDescription('Get the full chat log for a server by Job ID')
-        .addStringOption(o => o.setName('jobid').setDescription('Server Job ID').setRequired(true)),
+        .setDescription('View the chat log for a server'),
 
     new SlashCommandBuilder()
         .setName('friends')
@@ -216,8 +221,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('serverinfo')
-        .setDescription('Get details and stats about a specific server')
-        .addStringOption(o => o.setName('jobid').setDescription('Server Job ID').setRequired(true)),
+        .setDescription('Get details and stats about a server'),
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -232,15 +236,12 @@ client.once('ready', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
-    await interaction.deferReply();
+    if (!interaction.isChatInputCommand() && !interaction.isStringSelectMenu()) return;
 
-    const { commandName } = interaction;
+    // ── /players ──────────────────────────────────────────────────────────────
+    if (interaction.isChatInputCommand() && interaction.commandName === 'players') {
+        await interaction.deferReply();
 
-    // /players
-    // /players
-    // /players
-        if (commandName === 'players') {
         if (activeServers.size === 0) {
             return interaction.editReply('No active servers are being tracked right now.');
         }
@@ -251,15 +252,10 @@ client.on('interactionCreate', async interaction => {
         let currentPage = 0;
         const perPage = 5;
 
-        function buildEmbed(filter, page) {
-            const filtered = allServers.filter(([_, s]) =>
-                filter === 'All' || s.serverType === filter
-            );
-
+        function buildPlayersEmbed(filter, page) {
+            const filtered = allServers.filter(([_, s]) => filter === 'All' || s.serverType === filter);
             const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
             const pageSlice = filtered.slice(page * perPage, (page + 1) * perPage);
-
-            let totalPlayers = 0;
             const embed = new EmbedBuilder()
                 .setTitle(`Players Online — ${filter}`)
                 .setColor(0x3498db)
@@ -271,7 +267,6 @@ client.on('interactionCreate', async interaction => {
             } else {
                 for (const [jobId, server] of pageSlice) {
                     const count = server.players.size;
-                    totalPlayers += count;
                     const list = count > 0
                         ? [...server.players.values()].map(p => `${p.displayName} (@${p.username})`).join('\n')
                         : 'Empty';
@@ -281,13 +276,10 @@ client.on('interactionCreate', async interaction => {
                     });
                 }
             }
-
             return { embed, totalPages };
         }
 
-        function buildRows(filter, page, totalPages) {
-            const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
-
+        function buildPlayersRows(filter, page, totalPages) {
             const filterRow = new ActionRowBuilder().addComponents(
                 serverTypes.map(type =>
                     new ButtonBuilder()
@@ -296,153 +288,145 @@ client.on('interactionCreate', async interaction => {
                         .setStyle(type === filter ? ButtonStyle.Primary : ButtonStyle.Secondary)
                 )
             );
-
             const navRow = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('prev')
-                    .setLabel('◀ Prev')
-                    .setStyle(ButtonStyle.Secondary)
-                    .setDisabled(page === 0),
-                new ButtonBuilder()
-                    .setCustomId('next')
-                    .setLabel('Next ▶')
-                    .setStyle(ButtonStyle.Secondary)
-                    .setDisabled(page >= totalPages - 1),
+                new ButtonBuilder().setCustomId('prev').setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+                new ButtonBuilder().setCustomId('next').setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1),
             );
-
             return [filterRow, navRow];
         }
 
-        const { embed, totalPages } = buildEmbed(currentFilter, currentPage);
-        const rows = buildRows(currentFilter, currentPage, totalPages);
-
-        const reply = await interaction.editReply({
-            embeds: [embed],
-            components: rows,
-        });
-
+        const { embed, totalPages } = buildPlayersEmbed(currentFilter, currentPage);
+        const rows = buildPlayersRows(currentFilter, currentPage, totalPages);
+        const reply = await interaction.editReply({ embeds: [embed], components: rows });
         const collector = reply.createMessageComponentCollector({ time: 120_000 });
 
         collector.on('collect', async btn => {
-            if (btn.user.id !== interaction.user.id) {
-                return btn.reply({ content: 'These buttons are not for you.', ephemeral: true });
-            }
-
+            if (btn.user.id !== interaction.user.id) return btn.reply({ content: 'These buttons are not for you.', ephemeral: true });
             await btn.deferUpdate();
-
-            if (btn.customId.startsWith('filter_')) {
-                currentFilter = btn.customId.replace('filter_', '');
-                currentPage = 0;
-            } else if (btn.customId === 'prev') {
-                currentPage = Math.max(0, currentPage - 1);
-            } else if (btn.customId === 'next') {
-                currentPage++;
-            }
-
-            const { embed: newEmbed, totalPages: newTotal } = buildEmbed(currentFilter, currentPage);
-            const newRows = buildRows(currentFilter, currentPage, newTotal);
-
-            await interaction.editReply({ embeds: [newEmbed], components: newRows });
+            if (btn.customId.startsWith('filter_')) { currentFilter = btn.customId.replace('filter_', ''); currentPage = 0; }
+            else if (btn.customId === 'prev') currentPage = Math.max(0, currentPage - 1);
+            else if (btn.customId === 'next') currentPage++;
+            const { embed: newEmbed, totalPages: newTotal } = buildPlayersEmbed(currentFilter, currentPage);
+            await interaction.editReply({ embeds: [newEmbed], components: buildPlayersRows(currentFilter, currentPage, newTotal) });
         });
 
         collector.on('end', async () => {
-            const { embed: finalEmbed } = buildEmbed(currentFilter, currentPage);
+            const { embed: finalEmbed } = buildPlayersEmbed(currentFilter, currentPage);
             await interaction.editReply({ embeds: [finalEmbed], components: [] }).catch(() => {});
         });
     }
 
-    // /chatlogs
-    if (commandName === 'chatlogs') {
+    // ── /chatlogs ─────────────────────────────────────────────────────────────
+    if (interaction.isChatInputCommand() && interaction.commandName === 'chatlogs') {
+        await interaction.deferReply();
         const username = interaction.options.getString('username');
         const active = lookupActive(username);
         const recent = !active ? lookupRecent(username) : null;
 
         if (!active && !recent) {
-            return interaction.editReply(`No data found for **${username}**. They haven't connected to a tracked server since the bot started.`);
+            return interaction.editReply(`No data found for **${username}**.`);
         }
 
         const chatLog = active ? active.player.chatLog : recent.chatLog;
-        const status = active
-            ? '🟢 Currently online'
-            : `🔴 Last seen ${tsStr(recent.leaveTime)}`;
-
+        const status = active ? '🟢 Currently online' : `🔴 Last seen ${tsStr(recent.leaveTime)}`;
         const embed = buildChatEmbed(`Chat Logs — ${username}`, chatLog, active ? 0x2ecc71 : 0xe74c3c);
-        if (!embed) {
-            return interaction.editReply(`**${username}** has no chat messages on record. (${status})`);
-        }
 
+        if (!embed) return interaction.editReply(`**${username}** has no chat messages on record. (${status})`);
         embed.setDescription(`${status}\n\n${embed.data.description}`);
         return interaction.editReply({ embeds: [embed] });
     }
 
-    // /serverchat
-    if (commandName === 'serverchat') {
-        const jobId = interaction.options.getString('jobid');
-        const server = activeServers.get(jobId);
+    // ── /serverchat ───────────────────────────────────────────────────────────
+    if (interaction.isChatInputCommand() && interaction.commandName === 'serverchat') {
+        await interaction.deferReply();
 
-        if (!server) {
-            return interaction.editReply('Server not found. It may have shut down or the Job ID is wrong.');
-        }
+        if (activeServers.size === 0) return interaction.editReply('No active servers being tracked right now.');
 
-        const embed = buildChatEmbed(`Server Chat — \`${jobId.substring(0, 8)}...\``, server.chatLog, 0x3447db);
-        if (!embed) {
-            return interaction.editReply('No chat messages recorded for this server yet.');
-        }
+        const row = buildServerSelectMenu('serverchat_select', 'Select a server to view chat...');
+        const reply = await interaction.editReply({ content: 'Select a server:', components: [row] });
+        const collector = reply.createMessageComponentCollector({ time: 60_000 });
 
-        return interaction.editReply({ embeds: [embed] });
+        collector.on('collect', async sel => {
+            if (sel.user.id !== interaction.user.id) return sel.reply({ content: 'This menu is not for you.', ephemeral: true });
+            await sel.deferUpdate();
+            const jobId = sel.values[0];
+            const server = activeServers.get(jobId);
+            if (!server) return interaction.editReply({ content: 'That server is no longer active.', components: [] });
+
+            const embed = buildChatEmbed(`Server Chat — ${server.serverType}`, server.chatLog, 0x3447db);
+            if (!embed) return interaction.editReply({ content: 'No chat messages recorded for this server yet.', components: [] });
+
+            embed.addFields({ name: 'Full Job ID', value: `\`${jobId}\``, inline: false });
+            await interaction.editReply({ content: '', embeds: [embed], components: [] });
+            collector.stop();
+        });
+
+        collector.on('end', async (_, reason) => {
+            if (reason === 'time') await interaction.editReply({ content: 'Timed out.', components: [] }).catch(() => {});
+        });
     }
 
-    // /friends
-    if (commandName === 'friends') {
+    // ── /serverinfo ───────────────────────────────────────────────────────────
+    if (interaction.isChatInputCommand() && interaction.commandName === 'serverinfo') {
+        await interaction.deferReply();
+
+        if (activeServers.size === 0) return interaction.editReply('No active servers being tracked right now.');
+
+        const row = buildServerSelectMenu('serverinfo_select', 'Select a server to view info...');
+        const reply = await interaction.editReply({ content: 'Select a server:', components: [row] });
+        const collector = reply.createMessageComponentCollector({ time: 60_000 });
+
+        collector.on('collect', async sel => {
+            if (sel.user.id !== interaction.user.id) return sel.reply({ content: 'This menu is not for you.', ephemeral: true });
+            await sel.deferUpdate();
+            const jobId = sel.values[0];
+            const server = activeServers.get(jobId);
+            if (!server) return interaction.editReply({ content: 'That server is no longer active.', components: [] });
+
+            const playerList = server.players.size > 0
+                ? [...server.players.values()].map(p => `${p.displayName} (@${p.username})`).join('\n')
+                : 'None';
+
+            const embed = new EmbedBuilder()
+                .setTitle('Server Info')
+                .setColor(0x3447db)
+                .addFields(
+                    { name: 'Server Type', value: server.serverType, inline: true },
+                    { name: 'Players', value: `${server.players.size}/${server.maxPlayers}`, inline: true },
+                    { name: 'Uptime', value: uptimeStr(Date.now() - server.startTime), inline: true },
+                    { name: 'Place ID', value: String(server.placeId), inline: true },
+                    { name: 'Messages Logged', value: String(server.chatLog.length), inline: true },
+                    { name: 'Full Job ID', value: `\`${jobId}\``, inline: false },
+                    { name: 'Players Online', value: playerList.substring(0, 1024), inline: false },
+                )
+                .setTimestamp();
+
+            await interaction.editReply({ content: '', embeds: [embed], components: [] });
+            collector.stop();
+        });
+
+        collector.on('end', async (_, reason) => {
+            if (reason === 'time') await interaction.editReply({ content: 'Timed out.', components: [] }).catch(() => {});
+        });
+    }
+
+    // ── /friends ──────────────────────────────────────────────────────────────
+    if (interaction.isChatInputCommand() && interaction.commandName === 'friends') {
+        await interaction.deferReply();
         const username = interaction.options.getString('username');
         const active = lookupActive(username);
 
-        if (!active) {
-            return interaction.editReply(`**${username}** is not currently online in any tracked server.`);
-        }
+        if (!active) return interaction.editReply(`**${username}** is not currently online in any tracked server.`);
 
         const { player } = active;
-        const embed = new EmbedBuilder()
-            .setTitle(`Friends in Server — ${username}`)
-            .setColor(0x9b59b6)
-            .setTimestamp();
+        const embed = new EmbedBuilder().setTitle(`Friends in Server — ${username}`).setColor(0x9b59b6).setTimestamp();
 
         if (player.friendsInServer.length === 0) {
-            embed.setDescription('No friends were detected in this server when they joined.\n*(Note: players with private friend lists will always show empty)*');
+            embed.setDescription('No friends detected in this server.\n*(Players with private friend lists will always show empty)*');
         } else {
             embed.setDescription(player.friendsInServer.map(u => `@${u}`).join('\n'));
             embed.setFooter({ text: `${player.friendsInServer.length} friend(s)` });
         }
-
-        return interaction.editReply({ embeds: [embed] });
-    }
-
-    // /serverinfo
-    if (commandName === 'serverinfo') {
-        const jobId = interaction.options.getString('jobid');
-        const server = activeServers.get(jobId);
-
-        if (!server) {
-            return interaction.editReply('Server not found.');
-        }
-
-        const playerList = server.players.size > 0
-            ? [...server.players.values()].map(p => `${p.displayName} (@${p.username})`).join('\n')
-            : 'None';
-
-        const embed = new EmbedBuilder()
-            .setTitle('Server Info')
-            .setColor(0x3447db)
-            .addFields(
-                { name: 'Server Type', value: server.serverType, inline: true },
-                { name: 'Players', value: `${server.players.size}/${server.maxPlayers}`, inline: true },
-                { name: 'Uptime', value: uptimeStr(Date.now() - server.startTime), inline: true },
-                { name: 'Place ID', value: String(server.placeId), inline: true },
-                { name: 'Messages Logged', value: String(server.chatLog.length), inline: true },
-                { name: 'Job ID', value: `\`${jobId}\``, inline: false },
-                { name: 'Players Online', value: playerList.substring(0, 1024), inline: false },
-            )
-            .setTimestamp();
 
         return interaction.editReply({ embeds: [embed] });
     }
