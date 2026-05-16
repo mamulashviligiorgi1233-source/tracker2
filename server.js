@@ -359,4 +359,4 @@ client.on('interactionCreate', async interaction => {
 });
 
 client.login(BOT_TOKEN);
-app.listen(PORT, () => console.log(`Listening on port ${PORT}`));s
+app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
