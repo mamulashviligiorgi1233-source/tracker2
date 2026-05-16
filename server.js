@@ -22,6 +22,7 @@ const activeServers = new Map();
 const recentSessions = new Map();
 const usernameToId = new Map();  // username (lowercase) -> userId
 const playerIndex = new Map();   // userId -> { username, displayName, currentJobId }
+const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
 
 // ── Roblox API ────────────────────────────────────────────────────────────────
 function robloxGet(url) {
@@ -237,28 +238,117 @@ client.on('interactionCreate', async interaction => {
     const { commandName } = interaction;
 
     // /players
-    if (commandName === 'players') {
+    // /players
+    // /players
+        if (commandName === 'players') {
         if (activeServers.size === 0) {
             return interaction.editReply('No active servers are being tracked right now.');
         }
 
-        let totalPlayers = 0;
-        const embed = new EmbedBuilder().setTitle('Players Online').setColor(0x3498db).setTimestamp();
+        const allServers = [...activeServers.entries()];
+        const serverTypes = ['All', 'Public Server', 'Private Server', 'Reserved Server'];
+        let currentFilter = 'All';
+        let currentPage = 0;
+        const perPage = 5;
 
-        for (const [jobId, server] of activeServers) {
-            const count = server.players.size;
-            totalPlayers += count;
-            const list = count > 0
-                ? [...server.players.values()].map(p => `${p.displayName} (@${p.username})`).join('\n')
-                : 'Empty';
-            embed.addFields({
-                name: `${server.serverType} · ${count}/${server.maxPlayers} · \`${jobId.substring(0, 8)}...\``,
-                value: list.substring(0, 1024),
-            });
+        function buildEmbed(filter, page) {
+            const filtered = allServers.filter(([_, s]) =>
+                filter === 'All' || s.serverType === filter
+            );
+
+            const totalPages = Math.max(1, Math.ceil(filtered.length / perPage));
+            const pageSlice = filtered.slice(page * perPage, (page + 1) * perPage);
+
+            let totalPlayers = 0;
+            const embed = new EmbedBuilder()
+                .setTitle(`Players Online — ${filter}`)
+                .setColor(0x3498db)
+                .setTimestamp()
+                .setFooter({ text: `Page ${page + 1}/${totalPages} · ${filtered.length} server(s)` });
+
+            if (pageSlice.length === 0) {
+                embed.setDescription('No servers match this filter.');
+            } else {
+                for (const [jobId, server] of pageSlice) {
+                    const count = server.players.size;
+                    totalPlayers += count;
+                    const list = count > 0
+                        ? [...server.players.values()].map(p => `${p.displayName} (@${p.username})`).join('\n')
+                        : 'Empty';
+                    embed.addFields({
+                        name: `${server.serverType} · ${count}/${server.maxPlayers} · \`${jobId.substring(0, 8)}...\``,
+                        value: list.substring(0, 1024),
+                    });
+                }
+            }
+
+            return { embed, totalPages };
         }
 
-        embed.setFooter({ text: `${totalPlayers} player(s) across ${activeServers.size} server(s)` });
-        return interaction.editReply({ embeds: [embed] });
+        function buildRows(filter, page, totalPages) {
+            const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+
+            const filterRow = new ActionRowBuilder().addComponents(
+                serverTypes.map(type =>
+                    new ButtonBuilder()
+                        .setCustomId(`filter_${type}`)
+                        .setLabel(type)
+                        .setStyle(type === filter ? ButtonStyle.Primary : ButtonStyle.Secondary)
+                )
+            );
+
+            const navRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('prev')
+                    .setLabel('◀ Prev')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(page === 0),
+                new ButtonBuilder()
+                    .setCustomId('next')
+                    .setLabel('Next ▶')
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(page >= totalPages - 1),
+            );
+
+            return [filterRow, navRow];
+        }
+
+        const { embed, totalPages } = buildEmbed(currentFilter, currentPage);
+        const rows = buildRows(currentFilter, currentPage, totalPages);
+
+        const reply = await interaction.editReply({
+            embeds: [embed],
+            components: rows,
+        });
+
+        const collector = reply.createMessageComponentCollector({ time: 120_000 });
+
+        collector.on('collect', async btn => {
+            if (btn.user.id !== interaction.user.id) {
+                return btn.reply({ content: 'These buttons are not for you.', ephemeral: true });
+            }
+
+            await btn.deferUpdate();
+
+            if (btn.customId.startsWith('filter_')) {
+                currentFilter = btn.customId.replace('filter_', '');
+                currentPage = 0;
+            } else if (btn.customId === 'prev') {
+                currentPage = Math.max(0, currentPage - 1);
+            } else if (btn.customId === 'next') {
+                currentPage++;
+            }
+
+            const { embed: newEmbed, totalPages: newTotal } = buildEmbed(currentFilter, currentPage);
+            const newRows = buildRows(currentFilter, currentPage, newTotal);
+
+            await interaction.editReply({ embeds: [newEmbed], components: newRows });
+        });
+
+        collector.on('end', async () => {
+            const { embed: finalEmbed } = buildEmbed(currentFilter, currentPage);
+            await interaction.editReply({ embeds: [finalEmbed], components: [] }).catch(() => {});
+        });
     }
 
     // /chatlogs
