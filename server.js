@@ -20,6 +20,19 @@ app.use(express.json());
 
 const { BOT_TOKEN, CLIENT_ID, GUILD_ID, SHARED_SECRET, PORT = 3000 } = process.env;
 
+const ALLOWED_ROLES = [
+    '1352536754531336222',
+    '1352531721954000896',
+    '1452870606050693152',
+    '1393964675900772473',
+    '1402589926264016956',
+    '1393964997406621716',
+    '1352532155879919728',
+    '1352532883306319902',
+    '1354801120391987311',
+    '1352533075128750090',
+];
+
 // ── Storage ───────────────────────────────────────────────────────────────────
 const activeServers  = new Map();
 const recentSessions = new Map();
@@ -237,6 +250,15 @@ client.once('ready', async () => {
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand() && !interaction.isStringSelectMenu()) return;
+
+    // ── Role check ────────────────────────────────────────────────────────────
+    if (interaction.isChatInputCommand()) {
+        const member = interaction.member;
+        const hasRole = member && member.roles.cache.some(r => ALLOWED_ROLES.includes(r.id));
+        if (!hasRole) {
+            return interaction.reply({ content: 'You do not have permission to use this bot.', ephemeral: true });
+        }
+    }
 
     // ── /players ──────────────────────────────────────────────────────────────
     if (interaction.isChatInputCommand() && interaction.commandName === 'players') {
